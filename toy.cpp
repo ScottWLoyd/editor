@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include <assert.h>
 #include <stdio.h>
+#include <stdarg.h>
 
 typedef uint8_t u8;
 typedef uint16_t u16;
@@ -30,6 +31,16 @@ typedef double f64;
 
 #define MAX(x, y) ((x) >= (y) ? (x):(y))
 
+void DebugPrint(char* Format, ...)
+{
+	char temp[256];
+	va_list Args;
+	va_start(Args, Format);
+	vsprintf(temp, Format, Args);
+	va_end(Args);
+	OutputDebugStringA(temp);
+}
+
 void* Allocate(u32 Size)
 {
 	return HeapAlloc(GetProcessHeap(), HEAP_GENERATE_EXCEPTIONS, Size);
@@ -50,6 +61,7 @@ typedef u32 cursor;
 
 struct buffer
 {
+	u32 ReferenceCount;
 	u8*   Data;
 	cursor Point;
 	u32 GapStart;
@@ -61,21 +73,31 @@ struct buffer
 
 #define BufferLength(Buffer) (Buffer->End - BufferGapSize(Buffer))
 
-#define BufferIndex(Buffer, Cursor) ((Cursor < Buffer->GapStart) ? Cursor : Cursor + BufferGapSize(Buffer))
+#define CursorIndex(Buffer, Cursor) ((Cursor < Buffer->GapStart) ? Cursor : Cursor + BufferGapSize(Buffer))
 
-#define BufferCharacter(Buffer, Cursor) (Buffer->Data[BufferIndex(Buffer, Cursor)])
+#define CursorCharacter(Buffer, Cursor) (Buffer->Data[CursorIndex(Buffer, Cursor)])
 
-#define CursorNext(Buffer, Cursor) ((Cursor < BufferLength(Buffer)) ? Cursor + 1 : Cursor)
-
-#define CursorPrevious(Buffer, Cursor) ((Cursor > 0) ? Cursor - 1 : Cursor)
-
-void InitializeBuffer(buffer* Buffer, u32 InitialGapSize)
+buffer* CreateBuffer(u32 InitialGapSize)
 {
-	Buffer->Data = (u8*)Allocate(InitialGapSize);
-	Buffer->Point = 0;
-	Buffer->GapStart = 0;
-	Buffer->GapEnd = InitialGapSize;
-	Buffer->End = InitialGapSize;
+	buffer* Result = (buffer*)Allocate(sizeof(buffer));
+	Result->ReferenceCount = 1;
+	Result->Data = (u8*)Allocate(InitialGapSize);
+	Result->Point = 0;
+	Result->GapStart = 0;
+	Result->GapEnd = InitialGapSize;
+	Result->End = InitialGapSize;
+	return Result;
+}
+
+void ReleaseBuffer(buffer* Buffer)
+{
+	Assert(Buffer->ReferenceCount > 0)
+	Buffer->ReferenceCount--;
+	if (Buffer->ReferenceCount == 0)
+	{
+		Free(Buffer->Data);
+		Free(Buffer);
+	}
 }
 
 static void AssertBufferInvariants(buffer* Buffer)
@@ -129,7 +151,7 @@ bool ReplaceCharacter(buffer* Buffer, cursor Cursor, char Character)
 	AssertCursorInvariants(Buffer, Cursor);
 	if (Cursor < BufferLength(Buffer))
 	{
-		BufferCharacter(Buffer, Cursor) = Character;
+		CursorCharacter(Buffer, Cursor) = Character;
 		return true;
 	}
 	else
@@ -145,6 +167,11 @@ void InsertCharacter(buffer* Buffer, cursor Cursor, char Character)
 	ShiftGapToCursor(Buffer, Cursor);
 	Buffer->Data[Buffer->GapStart] = Character;
 	Buffer->GapStart++;
+
+	if (Buffer->Point >= Cursor)
+	{
+		Buffer->Point++;
+	}
 }
 
 bool DeleteBackwardCharacter(buffer* Buffer, cursor Cursor)
@@ -154,6 +181,10 @@ bool DeleteBackwardCharacter(buffer* Buffer, cursor Cursor)
 	{
 		ShiftGapToCursor(Buffer, Cursor);
 		Buffer->GapStart--;
+		if (Buffer->Point >= Cursor)
+		{
+			Buffer->Point--;
+		}
 		return true;
 	}
 	else
@@ -169,6 +200,10 @@ bool DeleteForwardCharacter(buffer* Buffer, cursor Cursor)
 	{
 		ShiftGapToCursor(Buffer, Cursor);
 		Buffer->GapEnd++;
+		if (Buffer->Point > Cursor)
+		{
+			Buffer->Point--;
+		}
 		return true;
 	}
 	else
@@ -177,8 +212,66 @@ bool DeleteForwardCharacter(buffer* Buffer, cursor Cursor)
 	}
 }
 
+cursor GetNextCharacterCursor(buffer* Buffer, cursor Cursor)
+{
+	AssertCursorInvariants(Buffer, Cursor);
+	if (Cursor < BufferLength(Buffer))
+	{
+		return Cursor + 1;		
+	}
+	else
+	{
+		return Cursor;
+	}
+}
+
+cursor GetPreviousCharacterCursor(buffer* Buffer, cursor Cursor)
+{
+	AssertCursorInvariants(Buffer, Cursor);
+	if (Cursor > 0)
+	{
+		return Cursor - 1;
+	}
+	else
+	{
+		return Cursor;
+	}
+}
+
+cursor GetBeginningOfLineCursor(buffer* Buffer, cursor Cursor)
+{
+	AssertCursorInvariants(Buffer, Cursor);
+	Cursor = GetPreviousCharacterCursor(Buffer, Cursor);
+	while (Cursor > 0)
+	{
+		char Character = CursorCharacter(Buffer, Cursor);
+		if (Character == '\n')
+		{
+			return GetNextCharacterCursor(Buffer, Cursor);
+		}
+		Cursor = GetPreviousCharacterCursor(Buffer, Cursor);
+	}
+	// we reached the beginning of the buffer
+	return 0;
+}
+
+cursor GetEndOfLineCursor(buffer* Buffer, cursor Cursor)
+{
+	AssertCursorInvariants(Buffer, Cursor);
+	while (Cursor < BufferLength(Buffer))
+	{
+		char Character = CursorCharacter(Buffer, Cursor);
+		if (Character == '\n')
+		{
+			return Cursor;
+		}
+		Cursor = GetNextCharacterCursor(Buffer, Cursor);
+	}
+	// we reached the end of the buffer
+	return BufferLength(Buffer);
+}
+
 buffer* CurrentBuffer;
-cursor CurrentCursor;
 
 // Drawing
 
@@ -195,7 +288,7 @@ u32 CopyLineFromBuffer(char* Line, int MaxLineLength, buffer* Buffer, cursor* Ou
 	int i;
 	for (i=0; i<MaxLineLength && Cursor < BufferLength(Buffer); i++)
 	{
-		char Character = BufferCharacter(Buffer, Cursor);
+		char Character = CursorCharacter(Buffer, Cursor);
 		if (Character == '\n')
 		{
 			break;
@@ -204,7 +297,7 @@ u32 CopyLineFromBuffer(char* Line, int MaxLineLength, buffer* Buffer, cursor* Ou
 		Line[i] = Character;
 		Cursor++;
 	}
-	while (Cursor < BufferLength(Buffer) && BufferCharacter(Buffer, Cursor) != '\n')
+	while (Cursor < BufferLength(Buffer) && CursorCharacter(Buffer, Cursor) != '\n')
 	{
 		Cursor++;
 	}
@@ -283,26 +376,34 @@ LRESULT CALLBACK QedWindowProc(HWND Window, UINT MessageType, WPARAM wParam, LPA
 
 		} break;
 		case WM_KEYDOWN: {
+			DebugPrint("Before: %d ", CurrentBuffer->Point);
 			switch(wParam)
-			{
+			{				
 				case VK_DELETE: {
-					DeleteForwardCharacter(CurrentBuffer, CurrentCursor);
+					DeleteForwardCharacter(CurrentBuffer, CurrentBuffer->Point);
 				} break;
 				case VK_BACK: {
-					DeleteBackwardCharacter(CurrentBuffer, CurrentCursor);
-					CurrentCursor = CursorPrevious(CurrentBuffer, CurrentCursor);
+					DeleteBackwardCharacter(CurrentBuffer, CurrentBuffer->Point);
+					//CurrentBuffer->Point = GetPreviousCharacterCursor(CurrentBuffer, CurrentBuffer->Point);
 				} break;
 				case VK_LEFT: {					
-					CurrentCursor = CursorPrevious(CurrentBuffer, CurrentCursor);
+					CurrentBuffer->Point = GetPreviousCharacterCursor(CurrentBuffer, CurrentBuffer->Point);
 				} break;
 				case VK_RIGHT: {					
-					CurrentCursor = CursorNext(CurrentBuffer, CurrentCursor);
+					CurrentBuffer->Point = GetNextCharacterCursor(CurrentBuffer, CurrentBuffer->Point);
+				} break;
+				case VK_HOME: {
+					CurrentBuffer->Point = GetBeginningOfLineCursor(CurrentBuffer, CurrentBuffer->Point);
+				} break;
+				case VK_END: {
+					CurrentBuffer->Point = GetEndOfLineCursor(CurrentBuffer, CurrentBuffer->Point);
 				} break;
 				case VK_RETURN: {
-					InsertCharacter(CurrentBuffer, CurrentCursor, '\n');
-					CurrentCursor = CursorNext(CurrentBuffer, CurrentCursor);
+					InsertCharacter(CurrentBuffer, CurrentBuffer->Point, '\n');
+					CurrentBuffer->Point = GetNextCharacterCursor(CurrentBuffer, CurrentBuffer->Point);
 				} break;
 			}
+			DebugPrint("After: %d \n", CurrentBuffer->Point);
 			RenderWindow(Window);
 		} break;
 		case WM_CHAR: {
@@ -310,8 +411,7 @@ LRESULT CALLBACK QedWindowProc(HWND Window, UINT MessageType, WPARAM wParam, LPA
 			WideCharToMultiByte(CP_UTF8, 0, (WCHAR*)&wParam, 1, &Character, 1, 0, 0);
 			if (' ' <= Character && Character <= '~')
 			{				
-				InsertCharacter(CurrentBuffer, CurrentCursor, Character);
-				CurrentCursor = CursorNext(CurrentBuffer, CurrentCursor);
+				InsertCharacter(CurrentBuffer, CurrentBuffer->Point, Character);
 				RenderWindow(Window);				
 			}
 		} break;
@@ -334,9 +434,7 @@ LRESULT CALLBACK QedWindowProc(HWND Window, UINT MessageType, WPARAM wParam, LPA
 int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int)
 {
 	FontSize = 36.0f;
-	buffer BufferData;
-	CurrentBuffer = &BufferData;
-	InitializeBuffer(CurrentBuffer, 2);
+	CurrentBuffer = CreateBuffer(2);
 
 	char* BufferText = "Hello\nWorld\nfoo bar bazzle";
 	for(int i=0; i<strlen(BufferText); i++)
@@ -356,6 +454,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int)
 	WindowClass.lpfnWndProc = QedWindowProc;
 	WindowClass.lpszClassName = "qed";
 	WindowClass.hbrBackground = GetSysColorBrush(COLOR_3DFACE);
+	WindowClass.hCursor = LoadCursor(NULL, IDC_ARROW);
 	RegisterClassA(&WindowClass);
 
 	HWND Window = CreateWindowA("qed", "QED", 
