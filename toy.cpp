@@ -69,13 +69,6 @@ struct buffer
 	u32 End;
 };
 
-#define BufferGapSize(Buffer) (Buffer->GapEnd - Buffer->GapStart)
-
-#define BufferLength(Buffer) (Buffer->End - BufferGapSize(Buffer))
-
-#define CursorIndex(Buffer, Cursor) ((Cursor < Buffer->GapStart) ? Cursor : Cursor + BufferGapSize(Buffer))
-
-#define CursorCharacter(Buffer, Cursor) (Buffer->Data[CursorIndex(Buffer, Cursor)])
 
 buffer* CreateBuffer(u32 InitialGapSize)
 {
@@ -100,6 +93,21 @@ void ReleaseBuffer(buffer* Buffer)
 	}
 }
 
+inline u32 GetBufferGapSize(buffer* Buffer)
+{
+	return Buffer->GapEnd - Buffer->GapStart;
+} 
+
+inline u32 GetBufferLength(buffer* Buffer)
+{
+	return Buffer->End - GetBufferGapSize(Buffer);
+}
+
+inline u32 GetBufferDataIndexFromCursor(buffer* Buffer, cursor Cursor)
+{
+	return (Cursor < Buffer->GapStart) ? Cursor : Cursor + GetBufferGapSize(Buffer);
+}
+
 static void AssertBufferInvariants(buffer* Buffer)
 {
 	Assert(Buffer->Data);
@@ -109,12 +117,24 @@ static void AssertBufferInvariants(buffer* Buffer)
 
 static void AssertCursorInvariants(buffer* Buffer, cursor Cursor)
 {
-	Assert(Cursor <= BufferLength(Buffer));
+	Assert(Cursor <= GetBufferLength(Buffer));
 }
+
+inline char GetBufferCharacter(buffer* Buffer, cursor Cursor)
+{
+	AssertCursorInvariants(Buffer, Cursor);
+	return Buffer->Data[GetBufferDataIndexFromCursor(Buffer, Cursor)];
+} 
+
+inline void SetBufferCharacter(buffer* Buffer, cursor Cursor, char Character)
+{
+	AssertCursorInvariants(Buffer, Cursor);
+	Buffer->Data[GetBufferDataIndexFromCursor(Buffer, Cursor)] = Character;
+} 
 
 static void ShiftGapToCursor(buffer* Buffer, cursor Cursor)
 {
-	u32 GapSize = BufferGapSize(Buffer);
+	u32 GapSize = GetBufferGapSize(Buffer);
 	if (Cursor < Buffer->GapStart)
 	{
 		u32 GapDelta = Buffer->GapStart - Cursor;
@@ -129,29 +149,29 @@ static void ShiftGapToCursor(buffer* Buffer, cursor Cursor)
 		Buffer->GapStart += GapDelta;
 		Buffer->GapEnd += GapDelta;
 	}
-	Assert(BufferGapSize(Buffer) == GapSize);
+	Assert(GetBufferGapSize(Buffer) == GapSize);
 	AssertBufferInvariants(Buffer);
 }
 
 static void EnsureGapSize(buffer* Buffer, u32 MinimumGapSize)
 {
-	if (BufferGapSize(Buffer) < MinimumGapSize)
+	if (GetBufferGapSize(Buffer) < MinimumGapSize)
 	{
-		ShiftGapToCursor(Buffer, BufferLength(Buffer));
+		ShiftGapToCursor(Buffer, GetBufferLength(Buffer));
 		u32 NewEnd = MAX(2 * Buffer->End, Buffer->End + MinimumGapSize);
 		Buffer->Data = (u8*)Reallocate(Buffer->Data, NewEnd);
 		Buffer->GapEnd = NewEnd;
 		Buffer->End = NewEnd;
 	}
-	Assert(BufferGapSize(Buffer) >= MinimumGapSize);
+	Assert(GetBufferGapSize(Buffer) >= MinimumGapSize);
 }
 
 bool ReplaceCharacter(buffer* Buffer, cursor Cursor, char Character)
 {
 	AssertCursorInvariants(Buffer, Cursor);
-	if (Cursor < BufferLength(Buffer))
+	if (Cursor < GetBufferLength(Buffer))
 	{
-		CursorCharacter(Buffer, Cursor) = Character;
+		SetBufferCharacter(Buffer, Cursor, Character);
 		return true;
 	}
 	else
@@ -196,7 +216,7 @@ bool DeleteBackwardCharacter(buffer* Buffer, cursor Cursor)
 bool DeleteForwardCharacter(buffer* Buffer, cursor Cursor)
 {
 	AssertCursorInvariants(Buffer, Cursor);
-	if (Cursor < BufferLength(Buffer))
+	if (Cursor < GetBufferLength(Buffer))
 	{
 		ShiftGapToCursor(Buffer, Cursor);
 		Buffer->GapEnd++;
@@ -215,7 +235,7 @@ bool DeleteForwardCharacter(buffer* Buffer, cursor Cursor)
 cursor GetNextCharacterCursor(buffer* Buffer, cursor Cursor)
 {
 	AssertCursorInvariants(Buffer, Cursor);
-	if (Cursor < BufferLength(Buffer))
+	if (Cursor < GetBufferLength(Buffer))
 	{
 		return Cursor + 1;		
 	}
@@ -244,7 +264,7 @@ cursor GetBeginningOfLineCursor(buffer* Buffer, cursor Cursor)
 	Cursor = GetPreviousCharacterCursor(Buffer, Cursor);
 	while (Cursor > 0)
 	{
-		char Character = CursorCharacter(Buffer, Cursor);
+		char Character = GetBufferCharacter(Buffer, Cursor);
 		if (Character == '\n')
 		{
 			return GetNextCharacterCursor(Buffer, Cursor);
@@ -258,9 +278,9 @@ cursor GetBeginningOfLineCursor(buffer* Buffer, cursor Cursor)
 cursor GetEndOfLineCursor(buffer* Buffer, cursor Cursor)
 {
 	AssertCursorInvariants(Buffer, Cursor);
-	while (Cursor < BufferLength(Buffer))
+	while (Cursor < GetBufferLength(Buffer))
 	{
-		char Character = CursorCharacter(Buffer, Cursor);
+		char Character = GetBufferCharacter(Buffer, Cursor);
 		if (Character == '\n')
 		{
 			return Cursor;
@@ -268,7 +288,7 @@ cursor GetEndOfLineCursor(buffer* Buffer, cursor Cursor)
 		Cursor = GetNextCharacterCursor(Buffer, Cursor);
 	}
 	// we reached the end of the buffer
-	return BufferLength(Buffer);
+	return GetBufferLength(Buffer);
 }
 
 buffer* CurrentBuffer;
@@ -286,9 +306,9 @@ u32 CopyLineFromBuffer(char* Line, int MaxLineLength, buffer* Buffer, cursor* Ou
 {
 	cursor Cursor = *OutCursor;
 	int i;
-	for (i=0; i<MaxLineLength && Cursor < BufferLength(Buffer); i++)
+	for (i=0; i<MaxLineLength && Cursor < GetBufferLength(Buffer); i++)
 	{
-		char Character = CursorCharacter(Buffer, Cursor);
+		char Character = GetBufferCharacter(Buffer, Cursor);
 		if (Character == '\n')
 		{
 			break;
@@ -297,7 +317,7 @@ u32 CopyLineFromBuffer(char* Line, int MaxLineLength, buffer* Buffer, cursor* Ou
 		Line[i] = Character;
 		Cursor++;
 	}
-	while (Cursor < BufferLength(Buffer) && CursorCharacter(Buffer, Cursor) != '\n')
+	while (Cursor < GetBufferLength(Buffer) && GetBufferCharacter(Buffer, Cursor) != '\n')
 	{
 		Cursor++;
 	}
@@ -326,7 +346,7 @@ void DrawBuffer(buffer* Buffer, f32 LineHeight, f32 x, f32 y, f32 width, f32 hei
 	LayoutRect.right = x + width;
 	LayoutRect.top = y;
 	LayoutRect.bottom = y + LineHeight;
-	for(cursor Cursor=0; Cursor < BufferLength(Buffer); Cursor++)
+	for(cursor Cursor=0; Cursor < GetBufferLength(Buffer); Cursor++)
 	{
 		u32 LineLength = CopyLineFromBuffer(Utf8Line, sizeof(Utf8Line) - 1, Buffer, &Cursor);
 		Utf8Line[LineLength] = 0;
