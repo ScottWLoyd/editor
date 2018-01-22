@@ -4,6 +4,7 @@
 #include <dwrite.h>
 #include <stdint.h>
 #include <assert.h>
+#include <stdio.h>
 
 typedef uint8_t u8;
 typedef uint16_t u16;
@@ -17,153 +18,230 @@ typedef int64_t i64;
 typedef float f32;
 typedef double f64;
 
+#define Assert(Cond) \
+	if(!(Cond)) { \
+		char __temp[256]; \
+		sprintf(__temp, "%s(%d): Assertion Failed!\n", __FILE__, __LINE__); \
+		OutputDebugStringA(__temp); \
+		*(int*)0=0; \
+	}
+
 #define ArrayCount(Array) (sizeof((Array))/sizeof((Array)[0]))
 
-typedef u32 buffer_position;
+#define MAX(x, y) ((x) >= (y) ? (x):(y))
+
+void* Allocate(u32 Size)
+{
+	return HeapAlloc(GetProcessHeap(), HEAP_GENERATE_EXCEPTIONS, Size);
+}
+
+void* Reallocate(void* Ptr, u32 Size)
+{
+	return HeapReAlloc(GetProcessHeap(), HEAP_GENERATE_EXCEPTIONS, Ptr, Size);
+}
+
+void Free(void* Ptr)
+{
+	HeapFree(GetProcessHeap(), 0, Ptr);
+}
+
+
+typedef u32 cursor;
 
 struct buffer
 {
-	char* Name;
 	u8*   Data;
-	buffer_position GapStartPosition;
-	buffer_position GapEndPosition;
-	buffer_position EndPosition;
+	cursor Point;
+	u32 GapStart;
+	u32 GapEnd;
+	u32 End;
 };
+
+#define BufferGapSize(Buffer) (Buffer->GapEnd - Buffer->GapStart)
+
+#define BufferLength(Buffer) (Buffer->End - BufferGapSize(Buffer))
+
+#define BufferIndex(Buffer, Cursor) ((Cursor < Buffer->GapStart) ? Cursor : Cursor + BufferGapSize(Buffer))
+
+#define BufferCharacter(Buffer, Cursor) (Buffer->Data[BufferIndex(Buffer, Cursor)])
+
+#define CursorNext(Buffer, Cursor) ((Cursor < BufferLength(Buffer)) ? Cursor + 1 : Cursor)
+
+#define CursorPrevious(Buffer, Cursor) ((Cursor > 0) ? Cursor - 1 : Cursor)
+
+void InitializeBuffer(buffer* Buffer, u32 InitialGapSize)
+{
+	Buffer->Data = (u8*)Allocate(InitialGapSize);
+	Buffer->Point = 0;
+	Buffer->GapStart = 0;
+	Buffer->GapEnd = InitialGapSize;
+	Buffer->End = InitialGapSize;
+}
+
+static void AssertBufferInvariants(buffer* Buffer)
+{
+	Assert(Buffer->Data);
+	Assert(Buffer->GapStart <= Buffer->GapEnd);
+	Assert(Buffer->GapEnd <= Buffer->End);
+}
+
+static void AssertCursorInvariants(buffer* Buffer, cursor Cursor)
+{
+	Assert(Cursor <= BufferLength(Buffer));
+}
+
+static void ShiftGapToCursor(buffer* Buffer, cursor Cursor)
+{
+	u32 GapSize = BufferGapSize(Buffer);
+	if (Cursor < Buffer->GapStart)
+	{
+		u32 GapDelta = Buffer->GapStart - Cursor;
+		Buffer->GapStart -= GapDelta;
+		Buffer->GapEnd -= GapDelta;
+		MoveMemory(Buffer->Data + Buffer->GapEnd, Buffer->Data + Buffer->GapStart, GapDelta);
+	}
+	else if (Cursor > Buffer->GapStart)
+	{
+		u32 GapDelta = Cursor - Buffer->GapStart;
+		MoveMemory(Buffer->Data + Buffer->GapStart, Buffer->Data + Buffer->GapEnd, GapDelta);
+		Buffer->GapStart += GapDelta;
+		Buffer->GapEnd += GapDelta;
+	}
+	Assert(BufferGapSize(Buffer) == GapSize);
+	AssertBufferInvariants(Buffer);
+}
+
+static void EnsureGapSize(buffer* Buffer, u32 MinimumGapSize)
+{
+	if (BufferGapSize(Buffer) < MinimumGapSize)
+	{
+		ShiftGapToCursor(Buffer, BufferLength(Buffer));
+		u32 NewEnd = MAX(2 * Buffer->End, Buffer->End + MinimumGapSize);
+		Buffer->Data = (u8*)Reallocate(Buffer->Data, NewEnd);
+		Buffer->GapEnd = NewEnd;
+		Buffer->End = NewEnd;
+	}
+	Assert(BufferGapSize(Buffer) >= MinimumGapSize);
+}
+
+bool ReplaceCharacter(buffer* Buffer, cursor Cursor, char Character)
+{
+	AssertCursorInvariants(Buffer, Cursor);
+	if (Cursor < BufferLength(Buffer))
+	{
+		BufferCharacter(Buffer, Cursor) = Character;
+		return true;
+	}
+	else
+	{
+		return false;
+	}
+}
+
+void InsertCharacter(buffer* Buffer, cursor Cursor, char Character)
+{
+	AssertCursorInvariants(Buffer, Cursor);
+	EnsureGapSize(Buffer, 100);
+	ShiftGapToCursor(Buffer, Cursor);
+	Buffer->Data[Buffer->GapStart] = Character;
+	Buffer->GapStart++;
+}
+
+bool DeleteBackwardCharacter(buffer* Buffer, cursor Cursor)
+{
+	AssertCursorInvariants(Buffer, Cursor);
+	if (Cursor > 0)
+	{
+		ShiftGapToCursor(Buffer, Cursor);
+		Buffer->GapStart--;
+		return true;
+	}
+	else
+	{
+		return false;
+	}
+}
+
+bool DeleteForwardCharacter(buffer* Buffer, cursor Cursor)
+{
+	AssertCursorInvariants(Buffer, Cursor);
+	if (Cursor < BufferLength(Buffer))
+	{
+		ShiftGapToCursor(Buffer, Cursor);
+		Buffer->GapEnd++;
+		return true;
+	}
+	else
+	{
+		return false;
+	}
+}
+
+buffer* CurrentBuffer;
+cursor CurrentCursor;
+
+// Drawing
 
 ID2D1Factory* D2dFactory;
 IDWriteFactory* DwriteFactory;
 ID2D1HwndRenderTarget* RenderTarget;
 IDWriteTextFormat* TextFormat;
-buffer* CurrentBuffer;
-buffer_position CurrentPos;
+ID2D1SolidColorBrush* TextBrush;
 f32 FontSize;
 
-ID2D1SolidColorBrush* TextBrush;
-WCHAR Text[] = L"Lorem ipsum dolor sit amet, consectetur adipiscing elit. Proin vehicula lectus ut egestas tincidunt. Maecenas placerat ligula vel nunc accumsan pulvinar. Curabitur at quam risus. Duis convallis lorem nisi, et pretium nisl imperdiet ut. Nam nec lacus vitae turpis pharetra gravida eu sed nulla. Cras at leo volutpat, gravida purus vitae, tempor ante. Integer nec massa ut lacus mollis viverra. Phasellus id dui egestas, vulputate sapien eget, commodo lorem. Morbi ac suscipit leo. Ut imperdiet lectus sed pulvinar sagittis. Donec et semper ante. Donec laoreet tellus quis turpis tempor mattis. Donec pellentesque elit ac arcu scelerisque, sit amet posuere erat vehicula. Vestibulum volutpat consectetur mauris, quis faucibus mi gravida eget.\n"
-"Mauris ac augue placerat, semper nisi et, aliquet velit. Suspendisse potenti. Etiam lorem enim, dapibus et augue eget, facilisis laoreet arcu. Interdum et malesuada fames ac ante ipsum primis in faucibus. Proin luctus fringilla mi, in lobortis ipsum pharetra sit amet. Curabitur eget ex at ante accumsan bibendum. Nam id rutrum magna.\n"
-"Donec non porta neque. Nunc turpis nibh, gravida cursus malesuada at, eleifend ac metus. Vivamus laoreet, lorem et placerat tempor, libero ante condimentum arcu, a elementum metus erat in leo. Integer tincidunt posuere bibendum. Quisque gravida risus arcu, accumsan blandit nulla interdum eget. Nunc eu consequat lacus. Duis pharetra vel mi in suscipit. Pellentesque sed diam sed lectus varius ullamcorper. Donec sed dictum augue.\n"
-"Curabitur non bibendum arcu. Suspendisse mauris leo, lobortis et placerat vitae, interdum vitae diam. Pellentesque porttitor et ligula vestibulum malesuada. Sed sagittis felis sed eros viverra, sollicitudin viverra sem cursus. Cras sit amet dignissim ipsum, a mattis nisi. Aliquam est augue, consequat sit amet varius quis, congue nec est. Maecenas at porta ligula, at vulputate metus. Nam ex augue, faucibus sit amet tempus mollis, posuere sed elit. Vestibulum posuere sed sem vitae imperdiet. Mauris a ipsum urna. Donec varius libero nibh. Vivamus interdum molestie mattis. Aenean lobortis, turpis a finibus consectetur, erat turpis tristique elit, sed aliquet eros risus id nunc. Cras eu posuere libero.\n"
-"Aliquam erat volutpat. Aliquam egestas nulla sed nisi fermentum semper. Nam non sapien cursus, finibus felis vitae, efficitur metus. Integer sit amet dolor congue, mattis augue et, malesuada enim. Ut ultrices nisi enim, ut malesuada risus molestie quis. Nunc sit amet erat ut lectus tincidunt luctus ut at augue. Nullam auctor, magna vitae finibus ornare, metus sapien sagittis ante, eget sodales erat erat eget nisl. Aliquam vel dapibus elit. Quisque malesuada gravida leo. Duis finibus eros accumsan mi maximus vehicula. Quisque odio augue, facilisis at sagittis eget, efficitur eget metus. Duis sollicitudin interdum congue. Sed eu efficitur tellus. Vivamus finibus, libero sit amet sodales eleifend, tortor orci porta nisl, in condimentum nunc enim nec urna.\n";
-
-
-void InitializeBuffer(buffer* Buffer, u32 InitialGapSize)
+u32 CopyLineFromBuffer(char* Line, int MaxLineLength, buffer* Buffer, cursor* OutCursor)
 {
-	Buffer->Data = (u8*)HeapAlloc(GetProcessHeap(), 0, InitialGapSize);
-	Buffer->GapStartPosition = 0;
-	Buffer->GapEndPosition = InitialGapSize;
-	Buffer->EndPosition = InitialGapSize;
-}
-
-buffer_position MoveBufferPositionForward(buffer* Buffer, buffer_position Pos)
-{
-	assert(Pos != Buffer->EndPosition);
-	Pos++;
-	if (Pos == Buffer->GapStartPosition)
+	cursor Cursor = *OutCursor;
+	int i;
+	for (i=0; i<MaxLineLength && Cursor < BufferLength(Buffer); i++)
 	{
-		Pos = Buffer->GapEndPosition;
-	}
-	return Pos;
-}
-
-void ShiftGapToPosition(buffer* Buffer, buffer_position Pos)
-{
-	u32 GapSize = Buffer->GapEndPosition - Buffer->GapStartPosition;
-	if (Pos < Buffer->GapStartPosition)
-	{
-		u32 GapDelta = Buffer->GapStartPosition - Pos;
-		Buffer->GapStartPosition -= GapDelta;
-		Buffer->GapEndPosition -= GapDelta;
-		MoveMemory(Buffer->Data + Buffer->GapEndPosition, Buffer->Data + Buffer->GapStartPosition, GapDelta);
-	}
-	else if (Pos > Buffer->GapStartPosition)
-	{
-		u32 GapDelta = Pos - Buffer->GapStartPosition;
-		MoveMemory(Buffer->Data + Buffer->GapStartPosition, Buffer->Data + Buffer->GapEndPosition, GapDelta);
-		Buffer->GapStartPosition += GapDelta;
-		Buffer->GapEndPosition += GapDelta;
-	}
-}
-
-void EnsureGapSize(buffer* Buffer, u32 MinimumGapSize)
-{
-	u32 GapSize = Buffer->GapEndPosition - Buffer->GapStartPosition;
-	if (GapSize < MinimumGapSize)
-	{
-		ShiftGapToPosition(Buffer, Buffer->EndPosition - GapSize);
-		u32 NewEndPosition = 2 * Buffer->EndPosition;
-		Buffer->Data = (u8*)HeapReAlloc(GetProcessHeap(), 0, Buffer->Data, NewEndPosition);
-		Buffer->GapEndPosition = NewEndPosition;
-		Buffer->EndPosition = NewEndPosition;
-	}
-}
-
-void InsertCharacter(buffer* Buffer, buffer_position Pos, char c)
-{
-	EnsureGapSize(Buffer, 1);
-	ShiftGapToPosition(Buffer, Pos);
-	Buffer->Data[Buffer->GapStartPosition] = c;
-	Buffer->GapStartPosition++;
-}
-
-buffer_position CopyLineFromBuffer(char* Dest, int DestSize, buffer* Buffer, buffer_position BufferPos)
-{
-	if (BufferPos >= Buffer->GapStartPosition && BufferPos < Buffer->GapEndPosition)
-	{
-		BufferPos = Buffer->GapEndPosition;
-	}
-	for(int i=0; i<DestSize && BufferPos < Buffer->EndPosition; i++)
-	{
-		char c = Buffer->Data[BufferPos];
-		if (c == '\n')
+		char Character = BufferCharacter(Buffer, Cursor);
+		if (Character == '\n')
 		{
 			break;
 		}
 
-		*Dest++ = c;
-		BufferPos = MoveBufferPositionForward(Buffer, BufferPos);
+		Line[i] = Character;
+		Cursor++;
 	}
-	return BufferPos;
+	while (Cursor < BufferLength(Buffer) && BufferCharacter(Buffer, Cursor) != '\n')
+	{
+		Cursor++;
+	}
+	*OutCursor = Cursor;
+	return i;
 }
 
 void DebugWriteBuffer(buffer* Buffer)
 {
 	char temp[1024];
-	CopyMemory(temp, Buffer->Data, Buffer->GapStartPosition);
-	temp[Buffer->GapStartPosition] = 0;
+	CopyMemory(temp, Buffer->Data, Buffer->GapStart);
+	temp[Buffer->GapStart] = 0;
 	OutputDebugStringA(temp);
-	CopyMemory(temp, Buffer->Data + Buffer->GapEndPosition, Buffer->EndPosition - Buffer->GapEndPosition);
-	temp[Buffer->EndPosition - Buffer->GapEndPosition] = 0;
+	CopyMemory(temp, Buffer->Data + Buffer->GapEnd, Buffer->End - Buffer->GapEnd);
+	temp[Buffer->End - Buffer->GapEnd] = 0;
 	OutputDebugStringA(temp);
 }
 
 void DrawBuffer(buffer* Buffer, f32 LineHeight, f32 x, f32 y, f32 width, f32 height)
 {
-	char Utf8Line[1024];
-	WCHAR Utf16Line[1024];
+	char Utf8Line[64];
+	WCHAR Utf16Line[64];
 
 	D2D1_RECT_F LayoutRect;
 	LayoutRect.left = x;
 	LayoutRect.right = x + width;
 	LayoutRect.top = y;
 	LayoutRect.bottom = y + LineHeight;
-
-	buffer_position BufferPos = 0;
-	for(;;)
+	for(cursor Cursor=0; Cursor < BufferLength(Buffer); Cursor++)
 	{
-		ZeroMemory(Utf8Line, sizeof(Utf8Line));
-		BufferPos = CopyLineFromBuffer(Utf8Line, sizeof(Utf8Line), Buffer, BufferPos);
+		u32 LineLength = CopyLineFromBuffer(Utf8Line, sizeof(Utf8Line) - 1, Buffer, &Cursor);
+		Utf8Line[LineLength] = 0;
 		MultiByteToWideChar(CP_UTF8, 0, Utf8Line, sizeof(Utf8Line), Utf16Line, ArrayCount(Utf16Line));
 		
 		RenderTarget->DrawText(Utf16Line, wcslen(Utf16Line), TextFormat, LayoutRect, TextBrush);
-
 		LayoutRect.top += LineHeight;
 		LayoutRect.bottom += LineHeight;
-
-		if (BufferPos == Buffer->EndPosition)
-		{
-			break;
-		}
-		BufferPos = MoveBufferPositionForward(Buffer, BufferPos);
 	}
 }
 
@@ -186,15 +264,15 @@ LRESULT CALLBACK QedWindowProc(HWND Window, UINT MessageType, WPARAM wParam, LPA
 	switch(MessageType)
 	{
 		case WM_SIZE: {
-			if (RenderTarget)
-			{
-				RenderTarget->Release();
-			}
 			RECT ClientRect;
 			GetClientRect(Window, &ClientRect);
 			D2D1_SIZE_U WindowSize;
 			WindowSize.width = ClientRect.right - ClientRect.left;
-			WindowSize.height = ClientRect.bottom - ClientRect.top;
+			WindowSize.height = ClientRect.bottom - ClientRect.top;			
+			if (RenderTarget)
+			{
+				RenderTarget->Release();
+			}
 			HResult = D2dFactory->CreateHwndRenderTarget(D2D1::RenderTargetProperties(), 
 				D2D1::HwndRenderTargetProperties(Window, WindowSize), &RenderTarget);
 			if(TextBrush)
@@ -204,10 +282,38 @@ LRESULT CALLBACK QedWindowProc(HWND Window, UINT MessageType, WPARAM wParam, LPA
 			HResult = RenderTarget->CreateSolidColorBrush(D2D1::ColorF(D2D1::ColorF::White), &TextBrush);
 
 		} break;
+		case WM_KEYDOWN: {
+			switch(wParam)
+			{
+				case VK_DELETE: {
+					DeleteForwardCharacter(CurrentBuffer, CurrentCursor);
+				} break;
+				case VK_BACK: {
+					DeleteBackwardCharacter(CurrentBuffer, CurrentCursor);
+					CurrentCursor = CursorPrevious(CurrentBuffer, CurrentCursor);
+				} break;
+				case VK_LEFT: {					
+					CurrentCursor = CursorPrevious(CurrentBuffer, CurrentCursor);
+				} break;
+				case VK_RIGHT: {					
+					CurrentCursor = CursorNext(CurrentBuffer, CurrentCursor);
+				} break;
+				case VK_RETURN: {
+					InsertCharacter(CurrentBuffer, CurrentCursor, '\n');
+					CurrentCursor = CursorNext(CurrentBuffer, CurrentCursor);
+				} break;
+			}
+			RenderWindow(Window);
+		} break;
 		case WM_CHAR: {
 			char Character;
 			WideCharToMultiByte(CP_UTF8, 0, (WCHAR*)&wParam, 1, &Character, 1, 0, 0);
-			InsertCharacter(CurrentBuffer, CurrentPos++, Character);
+			if (' ' <= Character && Character <= '~')
+			{				
+				InsertCharacter(CurrentBuffer, CurrentCursor, Character);
+				CurrentCursor = CursorNext(CurrentBuffer, CurrentCursor);
+				RenderWindow(Window);				
+			}
 		} break;
 		case WM_PAINT: {
 			RenderWindow(Window);
@@ -231,7 +337,6 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int)
 	buffer BufferData;
 	CurrentBuffer = &BufferData;
 	InitializeBuffer(CurrentBuffer, 2);
-	CurrentPos = 0;
 
 	char* BufferText = "Hello\nWorld\nfoo bar bazzle";
 	for(int i=0; i<strlen(BufferText); i++)
