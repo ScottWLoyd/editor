@@ -19,6 +19,8 @@ typedef int64_t i64;
 typedef float f32;
 typedef double f64;
 
+#define INLINE __forceinline
+
 #define Assert(Cond) \
 	if(!(Cond)) { \
 		char __temp[256]; \
@@ -54,6 +56,11 @@ void* Reallocate(void* Ptr, u32 Size)
 void Free(void* Ptr)
 {
 	HeapFree(GetProcessHeap(), 0, Ptr);
+}
+
+INLINE bool IsPrintableCharacter(char Ch)
+{
+	return (' ' <= Ch && Ch <= '~');
 }
 
 
@@ -93,40 +100,40 @@ void ReleaseBuffer(buffer* Buffer)
 	}
 }
 
-inline u32 GetBufferGapSize(buffer* Buffer)
+INLINE u32 GetBufferGapSize(buffer* Buffer)
 {
 	return Buffer->GapEnd - Buffer->GapStart;
 } 
 
-inline u32 GetBufferLength(buffer* Buffer)
+INLINE u32 GetBufferLength(buffer* Buffer)
 {
 	return Buffer->End - GetBufferGapSize(Buffer);
 }
 
-inline u32 GetBufferDataIndexFromCursor(buffer* Buffer, cursor Cursor)
+INLINE u32 GetBufferDataIndexFromCursor(buffer* Buffer, cursor Cursor)
 {
 	return (Cursor < Buffer->GapStart) ? Cursor : Cursor + GetBufferGapSize(Buffer);
 }
 
-static void AssertBufferInvariants(buffer* Buffer)
+INLINE void AssertBufferInvariants(buffer* Buffer)
 {
 	Assert(Buffer->Data);
 	Assert(Buffer->GapStart <= Buffer->GapEnd);
 	Assert(Buffer->GapEnd <= Buffer->End);
 }
 
-static void AssertCursorInvariants(buffer* Buffer, cursor Cursor)
+INLINE void AssertCursorInvariants(buffer* Buffer, cursor Cursor)
 {
 	Assert(Cursor <= GetBufferLength(Buffer));
 }
 
-inline char GetBufferCharacter(buffer* Buffer, cursor Cursor)
+INLINE char GetBufferCharacter(buffer* Buffer, cursor Cursor)
 {
 	AssertCursorInvariants(Buffer, Cursor);
 	return Buffer->Data[GetBufferDataIndexFromCursor(Buffer, Cursor)];
 } 
 
-inline void SetBufferCharacter(buffer* Buffer, cursor Cursor, char Character)
+INLINE void SetBufferCharacter(buffer* Buffer, cursor Cursor, char Character)
 {
 	AssertCursorInvariants(Buffer, Cursor);
 	Buffer->Data[GetBufferDataIndexFromCursor(Buffer, Cursor)] = Character;
@@ -183,7 +190,7 @@ bool ReplaceCharacter(buffer* Buffer, cursor Cursor, char Character)
 void InsertCharacter(buffer* Buffer, cursor Cursor, char Character)
 {
 	AssertCursorInvariants(Buffer, Cursor);
-	EnsureGapSize(Buffer, 100);
+	EnsureGapSize(Buffer, 1);
 	ShiftGapToCursor(Buffer, Cursor);
 	Buffer->Data[Buffer->GapStart] = Character;
 	Buffer->GapStart++;
@@ -293,7 +300,121 @@ cursor GetEndOfLineCursor(buffer* Buffer, cursor Cursor)
 
 buffer* CurrentBuffer;
 
+//
+// Input Events
+//
+
+enum input_event_type 
+{
+	INPUT_EVENT_PRESSED,
+	INPUT_EVENT_RELEASED,
+};
+
+struct input_event
+{
+	u16 KeyCombination;
+	u8 Character;
+	input_event_type Type;
+};
+
+input_event LastInputEvent;
+
+
+//
+// Commands
+//
+
+typedef void (*command_function)();
+
+struct command {
+	char* Name;
+	command_function Function;
+};
+
+void CommandFunction_Null()
+{
+	// TODO(scott): issue a warning of some sort here... beep?
+}
+command Command_Null = { "null", CommandFunction_Null };
+
+void CommandFunction_Exit()
+{
+	exit(0);
+}
+command Command_Exit = { "exit", CommandFunction_Exit };
+
+void CommandFunction_SelfInsertCharacter() 
+{
+	InsertCharacter(CurrentBuffer, CurrentBuffer->Point, LastInputEvent.Character);
+}
+command Command_SelfInsertCharacter = { "SelfInsertCharacter", CommandFunction_SelfInsertCharacter };
+
+//
+// Keymaps
+//
+
+// A key combination can be: key combined with ctrl/alt/shift
+// 1 byte for base key + 1 bit per modifier = 11 bits
+
+enum { MAX_KEY_COMBINATION = 1 << (8 + 3) };
+
+struct keymap {
+	command Commands[MAX_KEY_COMBINATION];
+};
+
+keymap* CurrentKeymap;
+
+INLINE u16 GetKeyCombination(u8 BaseKey, u8 Ctrl, u8 Alt, u8 Shift)
+{
+	return (u16)BaseKey | ((u16)Ctrl << 8) | ((u16)Alt << 9) | ((u16)Shift << 10);
+}
+
+INLINE command* GetKeymapCommand(keymap* Keymap, u16 KeyCombination)
+{
+	Assert(KeyCombination < MAX_KEY_COMBINATION);
+	return Keymap->Commands + KeyCombination;
+}
+
+keymap* CreateEmptyKeymap() 
+{
+	keymap* Keymap = (keymap*)Allocate(sizeof(keymap));
+	for(int i=0; i<MAX_KEY_COMBINATION; i++)
+	{
+		Keymap->Commands[i] = Command_Null;
+	}
+	return Keymap;
+}
+
+keymap* CreateDefaultKeymap()
+{
+	keymap* Keymap = CreateEmptyKeymap();
+	for (u32 Character = 0; Character < MAX_KEY_COMBINATION; Character++)
+	{
+		char Key = (char)(Character & 0xff);
+		if (Key < 256 && IsPrintableCharacter(Key))
+		{
+			Keymap->Commands[Character] = Command_SelfInsertCharacter;
+		}
+	}
+
+	Keymap->Commands[GetKeyCombination(VK_F4, false, true, false)] = Command_Exit;
+
+	return Keymap;
+}
+
+void DispatchInputEvent(keymap* Keymap, input_event InputEvent)
+{
+	if (InputEvent.Type == INPUT_EVENT_PRESSED)
+	{
+		command* Command = GetKeymapCommand(Keymap, InputEvent.KeyCombination);
+		DebugPrint("Command: %s\n", Command->Name);
+		Command->Function();
+	}
+}
+
+//
 // Drawing
+//
 
 ID2D1Factory* D2dFactory;
 IDWriteFactory* DwriteFactory;
@@ -369,6 +490,11 @@ void RenderWindow(HWND Window)
 }
 
 
+bool CtrlPressed;
+bool AltPressed;
+bool ShiftPressed;
+
+
 LRESULT CALLBACK QedWindowProc(HWND Window, UINT MessageType, WPARAM wParam, LPARAM lParam)
 {
 	LRESULT Result = 0;
@@ -376,6 +502,11 @@ LRESULT CALLBACK QedWindowProc(HWND Window, UINT MessageType, WPARAM wParam, LPA
 
 	switch(MessageType)
 	{
+		case WM_KILLFOCUS:
+		case WM_SETFOCUS: {
+			// TODO(scott): implement showing/hiding the cursor
+		} break;
+
 		case WM_SIZE: {
 			RECT ClientRect;
 			GetClientRect(Window, &ClientRect);
@@ -395,8 +526,46 @@ LRESULT CALLBACK QedWindowProc(HWND Window, UINT MessageType, WPARAM wParam, LPA
 			HResult = RenderTarget->CreateSolidColorBrush(D2D1::ColorF(D2D1::ColorF::White), &TextBrush);
 
 		} break;
+		case WM_SYSKEYDOWN:
 		case WM_KEYDOWN: {
-			DebugPrint("Before: %d ", CurrentBuffer->Point);
+			switch (wParam)
+			{
+				case VK_CONTROL: {
+					CtrlPressed = true;
+				} break;
+				case VK_SHIFT: {
+					ShiftPressed = true;
+				} break;
+				case VK_MENU: {
+					AltPressed = true;
+				} break;
+				default: {					
+					LastInputEvent.Type = INPUT_EVENT_PRESSED;
+					LastInputEvent.KeyCombination = GetKeyCombination(wParam, CtrlPressed, AltPressed, ShiftPressed);
+					u8 KeyboardState[256];
+					GetKeyboardState(KeyboardState);
+					u16 Characters;
+					if (1 == ToAscii(wParam, ((lParam) >> 16) & 0xff, KeyboardState, &Characters, 0))
+					{
+						LastInputEvent.Character = (u8)Characters;
+					}
+					else
+					{
+						LastInputEvent.Character = 0;
+					}
+					DispatchInputEvent(CurrentKeymap, LastInputEvent);
+				} break;
+			}
+			RenderWindow(Window);
+		} break;
+		case WM_SYSKEYUP: 
+		case WM_KEYUP: {
+			if (wParam & VK_CONTROL)
+			{
+				CtrlPressed = false;
+			}
+		} break;
+#if 0
 			switch(wParam)
 			{				
 				case VK_DELETE: {
@@ -423,18 +592,20 @@ LRESULT CALLBACK QedWindowProc(HWND Window, UINT MessageType, WPARAM wParam, LPA
 					CurrentBuffer->Point = GetNextCharacterCursor(CurrentBuffer, CurrentBuffer->Point);
 				} break;
 			}
-			DebugPrint("After: %d \n", CurrentBuffer->Point);
 			RenderWindow(Window);
 		} break;
+#endif
+#if 0
 		case WM_CHAR: {
 			char Character;
 			WideCharToMultiByte(CP_UTF8, 0, (WCHAR*)&wParam, 1, &Character, 1, 0, 0);
-			if (' ' <= Character && Character <= '~')
+			if (IsPrintableCharacter(Character))
 			{				
 				InsertCharacter(CurrentBuffer, CurrentBuffer->Point, Character);
 				RenderWindow(Window);				
 			}
 		} break;
+#endif
 		case WM_PAINT: {
 			RenderWindow(Window);
 		} break;
@@ -454,6 +625,7 @@ LRESULT CALLBACK QedWindowProc(HWND Window, UINT MessageType, WPARAM wParam, LPA
 int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int)
 {
 	FontSize = 36.0f;
+	CurrentKeymap = CreateDefaultKeymap();
 	CurrentBuffer = CreateBuffer(2);
 
 	char* BufferText = "Hello\nWorld\nfoo bar bazzle";
