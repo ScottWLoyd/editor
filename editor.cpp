@@ -298,6 +298,46 @@ cursor GetEndOfLineCursor(buffer* Buffer, cursor Cursor)
 	return GetBufferLength(Buffer);
 }
 
+cursor GetPrevLineCursor(buffer* Buffer, cursor Cursor)
+{
+	cursor Result = Cursor;
+	cursor LineStart = GetBeginningOfLineCursor(Buffer, Cursor);
+	u32 Column = Cursor - LineStart;
+	cursor PrevLineLastChar = GetPreviousCharacterCursor(Buffer, LineStart);
+	if (PrevLineLastChar != LineStart)
+	{
+		cursor PrevLineStart = GetBeginningOfLineCursor(Buffer, PrevLineLastChar);
+		u32 PrevLineLength = PrevLineLastChar - PrevLineStart;
+		if (PrevLineLength < Column)
+		{
+			Column = PrevLineLength;
+		}
+		Result = PrevLineStart + Column;
+	}
+	return Result;
+}
+
+cursor GetNextLineCursor(buffer* Buffer, cursor Cursor)
+{
+	cursor Result = Cursor;
+	cursor LineStart = GetBeginningOfLineCursor(Buffer, Cursor);
+	u32 Column = Cursor - LineStart;
+
+	cursor LineEnd = GetEndOfLineCursor(Buffer, Cursor);
+	cursor NextLineStart = GetNextCharacterCursor(Buffer, LineEnd);
+	if (NextLineStart != LineEnd)
+	{
+		cursor NextLineEnd = GetEndOfLineCursor(Buffer, NextLineStart);
+		u32 NextLineLength = NextLineEnd - NextLineStart;
+		if (NextLineLength < Column)
+		{
+			Column = NextLineLength;
+		}
+		Result = NextLineStart + Column;
+	}
+	return Result;
+}
+
 buffer* CurrentBuffer;
 
 //
@@ -349,6 +389,49 @@ void CommandFunction_SelfInsertCharacter()
 }
 command Command_SelfInsertCharacter = { "SelfInsertCharacter", CommandFunction_SelfInsertCharacter };
 
+void CommandFunction_SelfNextCharacter() 
+{
+	CurrentBuffer->Point = GetNextCharacterCursor(CurrentBuffer, CurrentBuffer->Point);
+}
+command Command_SelfNextCharacter = { "SelfNextCharacter", CommandFunction_SelfNextCharacter };
+
+void CommandFunction_SelfPrevCharacter() 
+{
+	CurrentBuffer->Point = GetPreviousCharacterCursor(CurrentBuffer, CurrentBuffer->Point);
+}
+command Command_SelfPrevCharacter = { "SelfPrevCharacter", CommandFunction_SelfPrevCharacter };
+
+void CommandFunction_SelfDeleteBackwardCharacter() 
+{
+	DeleteBackwardCharacter(CurrentBuffer, CurrentBuffer->Point);
+}
+command Command_SelfDeleteBackwardCharacter = { "SelfDeleteBackwardCharacter", CommandFunction_SelfDeleteBackwardCharacter };
+
+void CommandFunction_SelfDeleteForwardCharacter() 
+{
+	DeleteForwardCharacter(CurrentBuffer, CurrentBuffer->Point);
+}
+command Command_SelfDeleteForwardCharacter = { "SelfDeleteForwardCharacter", CommandFunction_SelfDeleteForwardCharacter };
+
+void CommandFunction_SelfInsertNewline()
+{
+	InsertCharacter(CurrentBuffer, CurrentBuffer->Point, '\n');
+	CurrentBuffer->Point = GetBeginningOfLineCursor(CurrentBuffer, CurrentBuffer->Point);
+}
+command Command_SelfInsertNewline = { "SelfInsertNewline", CommandFunction_SelfInsertNewline };
+
+void CommandFunction_SelfNextLine()
+{
+	CurrentBuffer->Point = GetNextLineCursor(CurrentBuffer, CurrentBuffer->Point);
+}
+command Command_SelfNextLine = { "SelfNextLine", CommandFunction_SelfNextLine };
+
+void CommandFunction_SelfPrevLine()
+{
+	CurrentBuffer->Point = GetPrevLineCursor(CurrentBuffer, CurrentBuffer->Point);
+}
+command Command_SelfPrevLine = { "SelfPrevLine", CommandFunction_SelfPrevLine };
+
 //
 // Keymaps
 //
@@ -397,6 +480,16 @@ keymap* CreateDefaultKeymap()
 		}
 	}
 
+	// Movement
+	Keymap->Commands[GetKeyCombination(VK_RIGHT, false, false, false)] = Command_SelfNextCharacter;
+	Keymap->Commands[GetKeyCombination(VK_LEFT, false, false, false)] = Command_SelfPrevCharacter;
+	Keymap->Commands[GetKeyCombination(VK_UP, false, false, false)] = Command_SelfPrevLine;
+	Keymap->Commands[GetKeyCombination(VK_DOWN, false, false, false)] = Command_SelfNextLine;
+	Keymap->Commands[GetKeyCombination(VK_RETURN, false, false, false)] = Command_SelfInsertNewline;
+
+	// Copy, paste, delete, backspace, etc
+	Keymap->Commands[GetKeyCombination(VK_BACK, false, false, false)] = Command_SelfDeleteBackwardCharacter;
+	Keymap->Commands[GetKeyCombination(VK_DELETE, false, false, false)] = Command_SelfDeleteForwardCharacter;
 	Keymap->Commands[GetKeyCombination(VK_F4, false, true, false)] = Command_Exit;
 
 	return Keymap;
@@ -407,7 +500,9 @@ void DispatchInputEvent(keymap* Keymap, input_event InputEvent)
 	if (InputEvent.Type == INPUT_EVENT_PRESSED)
 	{
 		command* Command = GetKeymapCommand(Keymap, InputEvent.KeyCombination);
-		DebugPrint("Command: %s\n", Command->Name);
+		DebugPrint("Keys: %d{%d%d%d}, Command: %s, Cursor: %d\n", InputEvent.KeyCombination & 0xff,
+			(InputEvent.KeyCombination >> 8) & 1, (InputEvent.KeyCombination >> 9) & 1, (InputEvent.KeyCombination >> 10) & 1,
+			Command->Name, CurrentBuffer->Point);
 		Command->Function();
 	}
 }
@@ -560,52 +655,19 @@ LRESULT CALLBACK QedWindowProc(HWND Window, UINT MessageType, WPARAM wParam, LPA
 		} break;
 		case WM_SYSKEYUP: 
 		case WM_KEYUP: {
-			if (wParam & VK_CONTROL)
-			{
-				CtrlPressed = false;
-			}
-		} break;
-#if 0
 			switch(wParam)
-			{				
-				case VK_DELETE: {
-					DeleteForwardCharacter(CurrentBuffer, CurrentBuffer->Point);
+			{
+				case VK_CONTROL: {
+					CtrlPressed = false;
 				} break;
-				case VK_BACK: {
-					DeleteBackwardCharacter(CurrentBuffer, CurrentBuffer->Point);
-					//CurrentBuffer->Point = GetPreviousCharacterCursor(CurrentBuffer, CurrentBuffer->Point);
+				case VK_SHIFT: {
+					ShiftPressed = false;
 				} break;
-				case VK_LEFT: {					
-					CurrentBuffer->Point = GetPreviousCharacterCursor(CurrentBuffer, CurrentBuffer->Point);
-				} break;
-				case VK_RIGHT: {					
-					CurrentBuffer->Point = GetNextCharacterCursor(CurrentBuffer, CurrentBuffer->Point);
-				} break;
-				case VK_HOME: {
-					CurrentBuffer->Point = GetBeginningOfLineCursor(CurrentBuffer, CurrentBuffer->Point);
-				} break;
-				case VK_END: {
-					CurrentBuffer->Point = GetEndOfLineCursor(CurrentBuffer, CurrentBuffer->Point);
-				} break;
-				case VK_RETURN: {
-					InsertCharacter(CurrentBuffer, CurrentBuffer->Point, '\n');
-					CurrentBuffer->Point = GetNextCharacterCursor(CurrentBuffer, CurrentBuffer->Point);
+				case VK_MENU: {
+					AltPressed = false;
 				} break;
 			}
-			RenderWindow(Window);
 		} break;
-#endif
-#if 0
-		case WM_CHAR: {
-			char Character;
-			WideCharToMultiByte(CP_UTF8, 0, (WCHAR*)&wParam, 1, &Character, 1, 0, 0);
-			if (IsPrintableCharacter(Character))
-			{				
-				InsertCharacter(CurrentBuffer, CurrentBuffer->Point, Character);
-				RenderWindow(Window);				
-			}
-		} break;
-#endif
 		case WM_PAINT: {
 			RenderWindow(Window);
 		} break;
