@@ -488,7 +488,7 @@ keymap* CreateDefaultKeymap()
 		u8 Key = (u8)(Character & 0x7f);
 		if (Key < 256 && IsPrintableCharacter(Key))
 		{
-			Keymap->Commands[Character] = Command_SelfInsertCharacter;
+			Keymap->Commands[Character] = Command_SelfInsertCharacter;		
 		}
 	}
 
@@ -576,6 +576,7 @@ void DrawBuffer(buffer* Buffer, f32 LineHeight, f32 x, f32 y, f32 width, f32 hei
 	LayoutRect.right = x + width;
 	LayoutRect.top = y;
 	LayoutRect.bottom = y + LineHeight;
+	cursor AccumulatedChars = 0;
 	for(cursor Cursor=0; Cursor < GetBufferLength(Buffer); Cursor++)
 	{
 		u32 LineLength = CopyLineFromBuffer(Utf8Line, sizeof(Utf8Line) - 1, Buffer, &Cursor);
@@ -583,6 +584,13 @@ void DrawBuffer(buffer* Buffer, f32 LineHeight, f32 x, f32 y, f32 width, f32 hei
 		MultiByteToWideChar(CP_UTF8, 0, Utf8Line, sizeof(Utf8Line), Utf16Line, ArrayCount(Utf16Line));
 		
 		RenderTarget->DrawText(Utf16Line, wcslen(Utf16Line), TextFormat, LayoutRect, TextBrush);
+		if (Buffer->Point > AccumulatedChars && Buffer->Point < (AccumulatedChars + LineLength))
+		{
+			// Point is on current line
+
+		}
+		AccumulatedChars += LineLength;
+
 		LayoutRect.top += LineHeight;
 		LayoutRect.bottom += LineHeight;
 	}
@@ -682,6 +690,9 @@ LRESULT CALLBACK QedWindowProc(HWND Window, UINT MessageType, WPARAM wParam, LPA
 				} break;
 			}
 		} break;
+		case WM_ERASEBKGND: {
+			return 0;
+		}			
 		case WM_PAINT: {
 			RenderWindow(Window);
 		} break;
