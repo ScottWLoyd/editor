@@ -58,7 +58,7 @@ void Free(void* Ptr)
 	HeapFree(GetProcessHeap(), 0, Ptr);
 }
 
-INLINE bool IsPrintableCharacter(char Ch)
+INLINE bool IsPrintableCharacter(u8 Ch)
 {
 	return (' ' <= Ch && Ch <= '~');
 }
@@ -432,6 +432,18 @@ void CommandFunction_SelfPrevLine()
 }
 command Command_SelfPrevLine = { "SelfPrevLine", CommandFunction_SelfPrevLine };
 
+void CommandFunction_SelfEndOfLine()
+{
+	CurrentBuffer->Point = GetEndOfLineCursor(CurrentBuffer, CurrentBuffer->Point);
+}
+command Command_SelfEndOfLine = { "SelfEndOfLine", CommandFunction_SelfEndOfLine };
+
+void CommandFunction_SelfStartOfLine()
+{
+	CurrentBuffer->Point = GetBeginningOfLineCursor(CurrentBuffer, CurrentBuffer->Point);
+}
+command Command_SelfStartOfLine = { "SelfStartOfLine", CommandFunction_SelfStartOfLine };
+
 //
 // Keymaps
 //
@@ -473,7 +485,7 @@ keymap* CreateDefaultKeymap()
 	keymap* Keymap = CreateEmptyKeymap();
 	for (u32 Character = 0; Character < MAX_KEY_COMBINATION; Character++)
 	{
-		char Key = (char)(Character & 0xff);
+		u8 Key = (u8)(Character & 0x7f);
 		if (Key < 256 && IsPrintableCharacter(Key))
 		{
 			Keymap->Commands[Character] = Command_SelfInsertCharacter;
@@ -486,6 +498,8 @@ keymap* CreateDefaultKeymap()
 	Keymap->Commands[GetKeyCombination(VK_UP, false, false, false)] = Command_SelfPrevLine;
 	Keymap->Commands[GetKeyCombination(VK_DOWN, false, false, false)] = Command_SelfNextLine;
 	Keymap->Commands[GetKeyCombination(VK_RETURN, false, false, false)] = Command_SelfInsertNewline;
+	Keymap->Commands[GetKeyCombination(VK_END, false, false, false)] = Command_SelfEndOfLine;
+	Keymap->Commands[GetKeyCombination(VK_HOME, false, false, false)] = Command_SelfStartOfLine;
 
 	// Copy, paste, delete, backspace, etc
 	Keymap->Commands[GetKeyCombination(VK_BACK, false, false, false)] = Command_SelfDeleteBackwardCharacter;
@@ -500,7 +514,7 @@ void DispatchInputEvent(keymap* Keymap, input_event InputEvent)
 	if (InputEvent.Type == INPUT_EVENT_PRESSED)
 	{
 		command* Command = GetKeymapCommand(Keymap, InputEvent.KeyCombination);
-		DebugPrint("Keys: %d{%d%d%d}, Command: %s, Cursor: %d\n", InputEvent.KeyCombination & 0xff,
+		DebugPrint("Keys: %c(%d){%d%d%d}, Command: %s, Cursor: %d\n", InputEvent.Character, InputEvent.KeyCombination & 0x7f,
 			(InputEvent.KeyCombination >> 8) & 1, (InputEvent.KeyCombination >> 9) & 1, (InputEvent.KeyCombination >> 10) & 1,
 			Command->Name, CurrentBuffer->Point);
 		Command->Function();
